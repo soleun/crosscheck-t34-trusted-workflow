@@ -9,8 +9,12 @@
 # template code (`prepare.py`, stdlib python) plus pinned GitHub actions.
 # Only `build` executes merchant-controlled bytes (`npm ci` with
 # `--ignore-scripts`, then the enrolled build recipe), and `build` holds no
-# secret and mints no identity. `attest` re-derives the output digest from
-# the bytes rather than trusting `build`'s claim.
+# secret and mints no identity. `build` stages only enrolled `dist/**`
+# files (`prepare.py stage-dist`); `attest` re-derives the output digest in
+# strict dist-only mode, and `upload` overlays only those staged files onto
+# the verified source tree (`prepare.py assemble`, collision-refusing)
+# before deploying. Nothing from `node_modules` or from the build job other
+# than `dist/**` reaches a trusted job.
 #
 # Permission notes (least-privilege; every grant is load-bearing):
 # - `source` holds `contents: read` only: it checks out the merchant repo at
@@ -67,7 +71,10 @@ on:
         required: true
         type: string
       claim_url:
-        description: CrossCheck claim endpoint. Empty when claim_mode is recording.
+        description: >-
+          Full CrossCheck upload-claim route for this run:
+          /api/v1/connectors/merchant-apps/:appBindingId/runs/:deployRunId/upload-claim.
+          Empty when claim_mode is recording.
         required: true
         type: string
       deploy_run_id:
@@ -88,6 +95,10 @@ on:
         type: number
       requested_version:
         description: Requested app version name (opaque argv value).
+        required: true
+        type: string
+      preparation_nonce:
+        description: Caller-chosen correlation nonce echoed in the claim body.
         required: true
         type: string
       source_control_url:
@@ -118,6 +129,9 @@ on:
     secrets:
       SHOPIFY_APP_AUTOMATION_TOKEN:
         description: App-scoped App Automation Token (environment secret, shopify-upload).
+        required: false
+      CROSSCHECK_UPLOAD_KEY:
+        description: CrossCheck deploy:write key sent as the claim Bearer (environment secret, shopify-upload).
         required: false
 
 jobs:
@@ -209,6 +223,8 @@ jobs:
     timeout-minutes: 15
     needs: [source]
     permissions: {}
+    outputs:
+      build_artifact_id: ${{ steps.upload-build.outputs.artifact-id }}
     steps:
       - name: Download the source archive
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -247,15 +263,28 @@ jobs:
 
       - name: Run the enrolled build recipe
         working-directory: ${{ inputs.app_root }}
+        env:
+          SHOPIFY_APP_CONFIG_NAME: ${{ inputs.config_name }}
         run: |
           npm run build
+
+      - name: Stage only the enrolled dist outputs
+        run: |
+          printf '%s' "$BASELINE_JSON" > baseline.json
+          python3 crosscheck-template/templates/shopify-merchant-app/prepare.py stage-dist \
+            --build-dir "${{ inputs.app_root }}" \
+            --baseline baseline.json \
+            --out-dir build-output
+        env:
+          BASELINE_JSON: ${{ inputs.baseline_json }}
 
       - name: Emit the output manifest and toolchain record
         run: |
           printf '%s' "$BASELINE_JSON" > baseline.json
           python3 crosscheck-template/templates/shopify-merchant-app/prepare.py output-manifest \
-            --build-dir "${{ inputs.app_root }}" \
+            --build-dir build-output \
             --baseline baseline.json \
+            --dist-only \
             > output-manifest.json
           node --version > toolchain.txt
           npm --version >> toolchain.txt
@@ -264,10 +293,11 @@ jobs:
           BASELINE_JSON: ${{ inputs.baseline_json }}
 
       - name: Upload the build payload
+        id: upload-build
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: build-output
-          path: ${{ inputs.app_root }}
+          path: build-output
           if-no-files-found: error
           retention-days: 7
 
@@ -317,6 +347,7 @@ jobs:
           python3 crosscheck-template/templates/shopify-merchant-app/prepare.py output-manifest \
             --build-dir build-output \
             --baseline baseline.json \
+            --dist-only \
             > output-manifest.redigest.json
           python3 -c "import json; print('build_output_digest=' + json.load(open('output-manifest.redigest.json'))['buildOutputDigest'])" >> "$GITHUB_OUTPUT"
 
@@ -325,10 +356,18 @@ jobs:
         with:
           subject-path: output-manifest.redigest.json
 
+      - name: Upload the re-derived output manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: attested-manifest
+          path: output-manifest.redigest.json
+          if-no-files-found: error
+          retention-days: 7
+
   upload:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs: [source, attest]
+    needs: [source, build, attest]
     environment: shopify-upload
     permissions:
       id-token: write
@@ -365,9 +404,29 @@ jobs:
           name: source-archive
           path: source-archive
 
+      - name: Download the attested output manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: attested-manifest
+          path: attested-manifest
+
       - name: Install the pinned Shopify CLI without lifecycle scripts
         run: |
           npm ci --ignore-scripts --prefix crosscheck-template/templates/shopify-merchant-app/cli
+
+      - name: Verify the source archive and assemble the deploy root
+        env:
+          BASELINE_JSON: ${{ inputs.baseline_json }}
+        run: |
+          test "$(sha256sum source-archive/source-archive.tar.gz | cut -d' ' -f1)" = "${{ needs.source.outputs.source_archive_sha256 }}"
+          mkdir -p deploy-root
+          tar -xzf source-archive/source-archive.tar.gz -C deploy-root
+          printf '%s' "$BASELINE_JSON" > baseline.json
+          python3 crosscheck-template/templates/shopify-merchant-app/prepare.py assemble \
+            --deploy-root deploy-root \
+            --build-output build-output \
+            --baseline baseline.json \
+            --app-root "${{ inputs.app_root }}"
 
       - name: Re-verify the output digest against the attested one
         env:
@@ -378,6 +437,7 @@ jobs:
           python3 crosscheck-template/templates/shopify-merchant-app/prepare.py output-manifest \
             --build-dir build-output \
             --baseline baseline.json \
+            --dist-only \
             > output-manifest.verify.json
           python3 -c "import json,os,sys; got=json.load(open('output-manifest.verify.json'))['buildOutputDigest']; sys.exit(0 if got==os.environ['ATTESTED_DIGEST'] else (print('digest mismatch', file=sys.stderr) or 1))"
 
@@ -391,15 +451,31 @@ jobs:
         id: claim
         if: inputs.claim_mode == 'live'
         run: |
-          python3 -c "import json; json.dump({'deployRunId': '${{ inputs.deploy_run_id }}', 'generation': ${{ inputs.generation }}, 'githubRunId': '${{ github.run_id }}', 'githubRunAttempt': '${{ github.run_attempt }}'}, open('claim-request.json', 'w'))"
+          python3 crosscheck-template/templates/shopify-merchant-app/prepare.py claim-request \
+            --workspace-id "${{ inputs.workspace_id }}" \
+            --generation ${{ inputs.generation }} \
+            --preparation-nonce "${{ inputs.preparation_nonce }}" \
+            --requested-version "${{ inputs.requested_version }}" \
+            --github-repository-id "${{ github.repository_id }}" \
+            --github-run-id "${{ github.run_id }}" \
+            --github-run-attempt ${{ github.run_attempt }} \
+            --trusted-workflow-ref "${{ inputs.trusted_workflow_ref }}" \
+            --trusted-workflow-sha "${{ inputs.trusted_template_ref }}" \
+            --source-archive-digest "${{ needs.source.outputs.source_archive_digest }}" \
+            --build-output-digest "${{ needs.attest.outputs.build_output_digest }}" \
+            --build-artifact-id "${{ needs.build.outputs.build_artifact_id }}" \
+            --output-manifest attested-manifest/output-manifest.redigest.json \
+            --out claim-request.json
           curl -sS --max-time 60 -X POST "${{ inputs.claim_url }}" \
             -H 'Content-Type: application/json' \
-            -H "Authorization: Bearer $(<oidc-token.txt)" \
+            -H "Authorization: Bearer ${{ secrets.CROSSCHECK_UPLOAD_KEY }}" \
+            -H "X-CrossCheck-Upload-Identity: $(<oidc-token.txt)" \
             --data @claim-request.json \
             -o claim-response.json
           if python3 crosscheck-template/templates/shopify-merchant-app/prepare.py claim-gate \
             --response claim-response.json \
-            --request claim-request.json; then
+            --request claim-request.json \
+            --deploy-run-id "${{ inputs.deploy_run_id }}"; then
             printf 'granted=true\n' >> "$GITHUB_OUTPUT"
           else
             printf 'granted=false\n' >> "$GITHUB_OUTPUT"
@@ -415,7 +491,7 @@ jobs:
             --no-release \
             --no-build \
             --config "${{ inputs.config_name }}" \
-            --path build-output \
+            --path "deploy-root/${{ inputs.app_root }}" \
             --version "${{ inputs.requested_version }}" \
             --source-control-url "${{ inputs.source_control_url }}"
 
@@ -424,7 +500,7 @@ jobs:
         run: |
           npx --no-install --prefix crosscheck-template/templates/shopify-merchant-app/cli shopify app versions list \
             --config "${{ inputs.config_name }}" \
-            --path build-output \
+            --path "deploy-root/${{ inputs.app_root }}" \
             --json > versions.json
 
       - name: Emit the build receipt
@@ -437,21 +513,24 @@ jobs:
           # reusable workflow is versioned with the template, so the enrolled
           # trustedWorkflowSha equals trusted_template_ref. CrossCheck
           # re-verifies the run's actual workflow identity server-side.
-          python3 -c "import json; json.dump({'workspaceId': '${{ inputs.workspace_id }}', 'deployRunId': '${{ inputs.deploy_run_id }}', 'appBindingId': '${{ inputs.app_binding_id }}', 'generation': ${{ inputs.generation }}, 'githubRepositoryId': '${{ github.repository_id }}', 'githubRunId': '${{ github.run_id }}', 'githubRunAttempt': '${{ github.run_attempt }}', 'trustedWorkflowSha': '${{ inputs.trusted_template_ref }}', 'sourceHash': json.load(open('source-archive/source-manifest.json'))['sourceArchiveDigest'], 'buildOutputDigest': json.load(open('output-manifest.verify.json'))['buildOutputDigest']}, open('claim.json', 'w'))"
+          python3 -c "import json; json.dump({'workspaceId': '${{ inputs.workspace_id }}', 'deployRunId': '${{ inputs.deploy_run_id }}', 'appBindingId': '${{ inputs.app_binding_id }}', 'generation': ${{ inputs.generation }}, 'githubRepositoryId': '${{ github.repository_id }}', 'githubRunId': '${{ github.run_id }}', 'githubRunAttempt': ${{ github.run_attempt }}, 'trustedWorkflowSha': '${{ inputs.trusted_template_ref }}', 'sourceHash': json.load(open('source-archive/source-manifest.json'))['sourceArchiveDigest'], 'buildOutputDigest': json.load(open('attested-manifest/output-manifest.redigest.json'))['buildOutputDigest']}, open('claim.json', 'w'))"
           UPLOAD_STATUS=not_attempted
-          if [ "${{ inputs.claim_mode }}" = "live" ] && [ "${{ steps.claim.outputs.granted }}" = "true" ]; then
-            UPLOAD_STATUS=succeeded
+          if [ "${{ inputs.claim_mode }}" = "live" ]; then
+            UPLOAD_STATUS=failed
+            if [ "${{ steps.claim.outputs.granted }}" = "true" ]; then
+              UPLOAD_STATUS=succeeded
+            fi
           fi
           python3 crosscheck-template/templates/shopify-merchant-app/prepare.py receipt \
             --baseline baseline.json \
             --manifest source-archive/source-manifest.json \
-            --output output-manifest.verify.json \
+            --output attested-manifest/output-manifest.redigest.json \
             --claim claim.json \
             --generation "${{ inputs.generation }}" \
             --run-attempt "${{ github.run_attempt }}" \
             --workflow-ref "${{ inputs.trusted_workflow_ref }}" \
-            --artifact-id build-output \
-            --artifact-digest "$(python3 -c "import hashlib; print(hashlib.sha256(open('output-manifest.verify.json','rb').read()).hexdigest())")" \
+            --artifact-id "${{ needs.build.outputs.build_artifact_id }}" \
+            --artifact-digest "$(python3 -c "import hashlib; print(hashlib.sha256(open('attested-manifest/output-manifest.redigest.json','rb').read()).hexdigest())")" \
             --image-digest "$(python3 -c "import hashlib; print(hashlib.sha256(open('/etc/os-release','rb').read()).hexdigest())")" \
             --toolchain-digest "$(python3 -c "import hashlib; print(hashlib.sha256(open('build-meta/toolchain.txt','rb').read()).hexdigest())")" \
             --cli-version "$(python3 -c "import json; print(json.load(open('crosscheck-template/templates/shopify-merchant-app/cli/package.json'))['dependencies']['@shopify/cli'])")" \
@@ -464,3 +543,13 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: receipt.json
+
+      - name: Upload the receipt and attested manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: crosscheck-receipt
+          path: |
+            receipt.json
+            attested-manifest/output-manifest.redigest.json
+          if-no-files-found: error
+          retention-days: 30
