@@ -35,6 +35,7 @@ MAX_BUILD_TOTAL_BYTES = 512 << 20  # 512 MiB total build output
 
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+VERSION_GID_RE = re.compile(r"^gid://shopify/Version/[0-9]+$")
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
 SECRET_KEY_RE = re.compile(r"token|secret|ciphertext|password|private[_-]?key|auth", re.IGNORECASE)
 
@@ -909,6 +910,59 @@ def find_secret_key(value: object) -> str | None:
     return None
 
 
+def observe_candidate_version(path: str, requested_version: str) -> tuple[str, str]:
+    """Resolve the observed candidate from a `versions list --json` capture.
+
+    Strict, never heuristic: the capture must be a JSON array whose every
+    record carries string ``versionTag``/``versionId``/``status``; exactly one
+    record must name the requested version; that record must not be active
+    (an unreleased candidate); and its id must be a Shopify Version GID.
+    Anything else refuses with a typed code.
+    """
+    try:
+        raw = load_json(path)
+    except Refusal as exc:
+        raise Refusal("VERSIONS_LIST_INVALID", f"versions list unreadable ({exc.code}): {exc.detail}")
+    if not isinstance(raw, list):
+        raise Refusal("VERSIONS_LIST_INVALID", "versions list must be a JSON array")
+    for index, entry in enumerate(raw):
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("versionTag"), str)
+            or not isinstance(entry.get("versionId"), str)
+            or not isinstance(entry.get("status"), str)
+        ):
+            raise Refusal(
+                "VERSIONS_LIST_INVALID",
+                f"versions list record {index} must carry string versionTag, versionId and status",
+            )
+    matches = [entry for entry in raw if isinstance(entry, dict) and entry.get("versionTag") == requested_version]
+    if len(matches) == 0:
+        raise Refusal(
+            "CANDIDATE_NOT_OBSERVED",
+            f"the requested version {requested_version!r} is absent from the versions list",
+        )
+    if len(matches) > 1:
+        raise Refusal(
+            "CANDIDATE_AMBIGUOUS",
+            f"the requested version {requested_version!r} appears {len(matches)} times in the versions list",
+        )
+    entry = matches[0]
+    assert isinstance(entry, dict)
+    if entry.get("status") == "active":
+        raise Refusal(
+            "CANDIDATE_ALREADY_ACTIVE",
+            f"the requested version {requested_version!r} is already active, not an unreleased candidate",
+        )
+    version_id = entry.get("versionId")
+    assert isinstance(version_id, str)
+    if not VERSION_GID_RE.match(version_id):
+        raise Refusal("VERSIONS_LIST_INVALID", f"versions list record for {requested_version!r} carries no Version GID")
+    version_tag = entry.get("versionTag")
+    assert isinstance(version_tag, str)
+    return version_tag, version_id
+
+
 def cmd_receipt(args: argparse.Namespace) -> int:
     baseline = require_manifest_shape(load_json(args.baseline), "baseline")
     manifest = require_manifest_shape(load_json(args.manifest), "manifest")
@@ -957,6 +1011,26 @@ def cmd_receipt(args: argparse.Namespace) -> int:
         )
     if not isinstance(manifest.get("commit"), str) or not FULL_SHA_RE.match(str(manifest.get("commit"))):
         raise Refusal("RECEIPT_FIELD_INVALID", "source manifest commit must be a full SHA")
+    requested_version = claim.get("requestedVersionName")
+    if not isinstance(requested_version, str) or not requested_version:
+        raise Refusal("CLAIM_MISMATCH", "claim is missing requestedVersionName")
+
+    if args.upload_status == "succeeded":
+        if not args.versions:
+            print(
+                "usage: prepare.py receipt --versions <path> is required when --upload-status succeeded",
+                file=sys.stderr,
+            )
+            return 2
+        observed_tag, observed_id = observe_candidate_version(args.versions, requested_version)
+    else:
+        if args.versions:
+            print(
+                "usage: prepare.py receipt --versions must be absent unless --upload-status succeeded",
+                file=sys.stderr,
+            )
+            return 2
+        observed_tag, observed_id = None, None
 
     receipt: dict[str, object] = {
         "workspaceId": claim["workspaceId"],
@@ -984,8 +1058,8 @@ def cmd_receipt(args: argparse.Namespace) -> int:
         "cliVersion": args.cli_version,
         "buildStatus": args.build_status,
         "uploadStatus": args.upload_status,
-        "observedCandidateVersionTag": args.observed_tag,
-        "observedCandidateVersionId": args.observed_id,
+        "observedCandidateVersionTag": observed_tag,
+        "observedCandidateVersionId": observed_id,
     }
     if list(receipt.keys()) != RECEIPT_KEYS:
         raise Refusal("RECEIPT_FIELD_INVALID", "receipt keys do not match AppBuildReceiptV1")
@@ -1080,8 +1154,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cli-version", required=True)
     p.add_argument("--build-status", required=True)
     p.add_argument("--upload-status", required=True)
-    p.add_argument("--observed-tag", default=None)
-    p.add_argument("--observed-id", default=None)
+    p.add_argument("--versions", default=None)
     p.add_argument("--out", required=True)
     p.set_defaults(func=cmd_receipt)
     return parser

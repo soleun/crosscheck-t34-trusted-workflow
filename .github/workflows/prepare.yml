@@ -518,13 +518,21 @@ jobs:
           # reusable workflow is versioned with the template, so the enrolled
           # trustedWorkflowSha equals trusted_template_ref. CrossCheck
           # re-verifies the run's actual workflow identity server-side.
-          python3 -c "import json; json.dump({'workspaceId': '${{ inputs.workspace_id }}', 'deployRunId': '${{ inputs.deploy_run_id }}', 'appBindingId': '${{ inputs.app_binding_id }}', 'generation': ${{ inputs.generation }}, 'githubRepositoryId': '${{ github.repository_id }}', 'githubRunId': '${{ github.run_id }}', 'githubRunAttempt': ${{ github.run_attempt }}, 'trustedWorkflowSha': '${{ inputs.trusted_template_ref }}', 'sourceHash': json.load(open('source-archive/source-manifest.json'))['sourceArchiveDigest'], 'buildOutputDigest': json.load(open('attested-manifest/output-manifest.redigest.json'))['buildOutputDigest']}, open('claim.json', 'w'))"
+          python3 -c "import json; json.dump({'workspaceId': '${{ inputs.workspace_id }}', 'deployRunId': '${{ inputs.deploy_run_id }}', 'appBindingId': '${{ inputs.app_binding_id }}', 'generation': ${{ inputs.generation }}, 'githubRepositoryId': '${{ github.repository_id }}', 'githubRunId': '${{ github.run_id }}', 'githubRunAttempt': ${{ github.run_attempt }}, 'trustedWorkflowSha': '${{ inputs.trusted_template_ref }}', 'requestedVersionName': '${{ inputs.requested_version }}', 'sourceHash': json.load(open('source-archive/source-manifest.json'))['sourceArchiveDigest'], 'buildOutputDigest': json.load(open('attested-manifest/output-manifest.redigest.json'))['buildOutputDigest']}, open('claim.json', 'w'))"
           UPLOAD_STATUS=not_attempted
           if [ "${{ inputs.claim_mode }}" = "live" ]; then
             UPLOAD_STATUS=failed
             if [ "${{ steps.claim.outputs.granted }}" = "true" ]; then
               UPLOAD_STATUS=succeeded
             fi
+          fi
+          # The receipt names the candidate the CLI actually created, read
+          # from `versions.json` — but only when the upload succeeded. Any
+          # other status prepares no candidate, so the observed fields stay
+          # null and the versions capture must be absent.
+          VERSIONS_ARG=""
+          if [ "$UPLOAD_STATUS" = "succeeded" ]; then
+            VERSIONS_ARG="--versions versions.json"
           fi
           python3 crosscheck-template/templates/shopify-merchant-app/prepare.py receipt \
             --baseline baseline.json \
@@ -541,6 +549,7 @@ jobs:
             --cli-version "$(python3 -c "import json; print(json.load(open('crosscheck-template/templates/shopify-merchant-app/cli/package.json'))['dependencies']['@shopify/cli'])")" \
             --build-status succeeded \
             --upload-status "$UPLOAD_STATUS" \
+            $VERSIONS_ARG \
             --out receipt.json
           printf 'upload_status=%s\n' "$UPLOAD_STATUS" >> "$GITHUB_OUTPUT"
 
