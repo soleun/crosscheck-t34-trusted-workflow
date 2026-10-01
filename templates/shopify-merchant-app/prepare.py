@@ -6,7 +6,9 @@ Runs inside the merchant repo's trusted reusable workflow
 
 Subcommands: source-manifest, policy-check, output-manifest, stage-dist,
 assemble, claim-request, claim-gate, receipt. Exit 0 on success, 1 on
-refusal (JSON ``{code, detail}`` on stdout), 2 on usage error.
+refusal (JSON ``{code, detail}`` on stderr), 2 on usage error. Stdout
+carries only the successful output document; refusals never touch stdout
+so a ``> file`` redirect cannot swallow the refusal code.
 """
 
 from __future__ import annotations
@@ -77,7 +79,7 @@ class Refusal(Exception):
 
 
 def emit_refusal(code: str, detail: str) -> int:
-    print(json.dumps({"code": code, "detail": detail}))
+    print(json.dumps({"code": code, "detail": detail}), file=sys.stderr)
     return 1
 
 

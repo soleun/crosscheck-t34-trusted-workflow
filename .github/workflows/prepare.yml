@@ -18,8 +18,10 @@
 #
 # Permission notes (least-privilege; every grant is load-bearing):
 # - `source` holds `contents: read` only: it checks out the merchant repo at
-#   the pinned commit and the trusted template at `trusted_template_ref`.
-#   Same-run `upload-artifact` calls authenticate with the job's runtime
+#   the pinned commit into `merchant/` and the trusted template at
+#   `trusted_template_ref` into the sibling `crosscheck-template/`, so
+#   neither tree sits inside the other and the clean-tree check sees a
+#   pristine merchant checkout. Same-run `upload-artifact` calls authenticate with the job's runtime
 #   token, so no `actions` permission is needed to publish `source-archive`
 #   and `template-archive`.
 # - `build` holds `permissions: {}` and performs no checkout: it downloads
@@ -149,6 +151,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.commit_sha }}
+          path: merchant
           persist-credentials: false
           submodules: false
           lfs: false
@@ -168,7 +171,7 @@ jobs:
         id: manifest
         run: |
           python3 crosscheck-template/templates/shopify-merchant-app/prepare.py source-manifest \
-            --repo "$GITHUB_WORKSPACE" \
+            --repo "$GITHUB_WORKSPACE/merchant" \
             --commit "${{ inputs.commit_sha }}" \
             --app-root "${{ inputs.app_root }}" \
             --config-name "${{ inputs.config_name }}" \
@@ -187,7 +190,7 @@ jobs:
 
       - name: Archive the enrolled source tree
         run: |
-          git archive -o source-archive.tar.gz "${{ inputs.commit_sha }}" -- "${{ inputs.app_root }}"
+          git -C merchant archive -o "$GITHUB_WORKSPACE/source-archive.tar.gz" "${{ inputs.commit_sha }}" -- "${{ inputs.app_root }}"
 
       - name: Archive the trusted template tree (deterministic tar)
         run: |
