@@ -194,7 +194,7 @@ jobs:
 
       - name: Archive the trusted template tree (deterministic tar)
         run: |
-          tar --sort-name --owner=0 --group=0 --numeric-owner --mtime='2000-01-01' \
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='2000-01-01' \
             --exclude='.git' -cf template-archive.tar -C crosscheck-template .
 
       - name: Digest both archives
