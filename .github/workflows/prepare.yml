@@ -500,6 +500,8 @@ jobs:
 
       - name: List app versions (live only, gated on the claim)
         if: inputs.claim_mode == 'live' && steps.claim.outputs.granted == 'true'
+        env:
+          SHOPIFY_APP_AUTOMATION_TOKEN: ${{ secrets.SHOPIFY_APP_AUTOMATION_TOKEN }}
         run: |
           npx --no-install --prefix crosscheck-template/templates/shopify-merchant-app/cli shopify app versions list \
             --config "${{ inputs.config_name }}" \
