@@ -125,7 +125,8 @@ the `upload` job and never printed, persisted, or uploaded.
 ## Claim body
 
 `prepare.py claim-request` builds the strict typed body: `schemaVersion:
-1`, `workspaceId`, `generation` (int), `preparationNonce` (the caller's
+1`, `workspaceId`, `generation` (non-negative int, M5 0-based — the first
+preparation is 0), `preparationNonce` (the caller's
 `workflow_dispatch`/`workflow_call` input; correlation only, visible on a
 public repo), `requestedVersionName`, `githubRepositoryId`/`githubRunId`
 (strings), `githubRunAttempt` (int), `trustedWorkflowRef`,
@@ -141,6 +142,33 @@ refuses at usage time.
 Every run uploads `receipt.json` plus the attested output manifest as the
 `crosscheck-receipt` artifact, and the receipt carries the numeric
 `build-output` artifact id. A named id refuses.
+
+## Receipt POST (live only, RND-4084 T411)
+
+After the receipt is written and attested, and only when `claim_mode ==
+live` and the claim was granted (`steps.claim.outputs.granted == 'true'`),
+the `upload` job mints a **fresh** OIDC token (same audience and mechanism
+as the claim step, into a separate `oidc-receipt-token.txt`) and POSTs the
+exact `receipt.json` bytes to the receipt route — exactly once, no retry
+loop, `curl --max-time 60` — with `Authorization: Bearer
+<CROSSCHECK_UPLOAD_KEY>` and `X-CrossCheck-Upload-Identity: <OIDC JWT>`.
+Recording runs never post; they still write and attest the receipt.
+
+The receipt URL is derived deterministically from `claim_url` by replacing
+the trailing `/upload-claim` with `/receipt`, so both POSTs provably target
+the same binding and run — no second caller-supplied URL can drift. A
+`claim_url` that does not end in `/upload-claim` refuses loudly (`exit 1`)
+before any network call. No new template input was added for this reason:
+one URL in means the receipt cannot be aimed at a different run than the
+claim granted.
+
+`prepare.py receipt-gate --response receipt-response.json` gates the
+response: exit 0 only on `success === true` with the JSON boolean
+`observed: true` and the JSON boolean `replay: false`. A missing envelope,
+a string `"true"`, `observed: false`, or a replay answer (the route marks a
+second POST of the same bytes with `replay: true`) all refuse with
+`RECEIPT_GATE_REFUSED`, and the refusal runs as a bare command so it fails
+the job loudly.
 
 ## The app TOML contract
 

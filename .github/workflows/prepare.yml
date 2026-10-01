@@ -92,7 +92,7 @@ on:
         required: true
         type: string
       generation:
-        description: Deploy generation (positive integer).
+        description: Deploy generation (non-negative integer, M5 0-based; the first preparation is 0).
         required: true
         type: number
       requested_version:
@@ -556,3 +556,27 @@ jobs:
             attested-manifest/output-manifest.redigest.json
           if-no-files-found: error
           retention-days: 30
+
+      - name: Mint a fresh OIDC token for the receipt POST
+        if: inputs.claim_mode == 'live' && steps.claim.outputs.granted == 'true'
+        run: |
+          OIDC_TOKEN="$(curl -sS --max-time 30 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=${{ inputs.oidc_audience }}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
+          printf '%s' "$OIDC_TOKEN" > oidc-receipt-token.txt
+
+      - name: POST the attested receipt (live only, single attempt, no retry)
+        if: inputs.claim_mode == 'live' && steps.claim.outputs.granted == 'true'
+        run: |
+          CLAIM_URL="${{ inputs.claim_url }}"
+          RECEIPT_URL="${CLAIM_URL%/upload-claim}/receipt"
+          if [ "$RECEIPT_URL" = "$CLAIM_URL/receipt" ]; then
+            printf '%s\n' "RECEIPT_URL_REFUSED: claim_url does not end in /upload-claim" >&2
+            exit 1
+          fi
+          curl -sS --max-time 60 -X POST "$RECEIPT_URL" \
+            -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer ${{ secrets.CROSSCHECK_UPLOAD_KEY }}" \
+            -H "X-CrossCheck-Upload-Identity: $(<oidc-receipt-token.txt)" \
+            --data @receipt.json \
+            -o receipt-response.json
+          python3 crosscheck-template/templates/shopify-merchant-app/prepare.py receipt-gate \
+            --response receipt-response.json

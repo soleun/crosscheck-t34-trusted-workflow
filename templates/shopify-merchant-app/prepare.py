@@ -5,7 +5,7 @@ Runs inside the merchant repo's trusted reusable workflow
 (`templates/shopify-merchant-app/prepare.yml`). Stdlib only.
 
 Subcommands: source-manifest, policy-check, output-manifest, stage-dist,
-assemble, claim-request, claim-gate, receipt. Exit 0 on success, 1 on
+assemble, claim-request, claim-gate, receipt, receipt-gate. Exit 0 on success, 1 on
 refusal (JSON ``{code, detail}`` on stderr), 2 on usage error. Stdout
 carries only the successful output document; refusals never touch stdout
 so a ``> file`` redirect cannot swallow the refusal code.
@@ -725,12 +725,14 @@ def cmd_claim_request(args: argparse.Namespace) -> int:
     Every int-typed field arrives as an argparse ``int`` so a string
     attempt (``githubRunAttempt: "2"``) fails at usage time, never as a
     silently quoted JSON string. The numeric artifact id is validated as
-    digits and emitted as a JSON number.
+    digits and emitted as a JSON number. Generation is M5's 0-based
+    generation (RND-4084 T403): 0 is the first preparation and is valid;
+    negatives refuse.
     """
     generation = args.generation
     run_attempt = args.github_run_attempt
-    if generation < 1:
-        raise Refusal("CLAIM_FIELD_INVALID", "generation must be a positive integer")
+    if generation < 0:
+        raise Refusal("CLAIM_FIELD_INVALID", "generation must be a non-negative integer")
     if run_attempt < 1:
         raise Refusal("CLAIM_FIELD_INVALID", "github-run-attempt must be a positive integer")
     for label, value in (
@@ -842,6 +844,45 @@ def cmd_claim_gate(args: argparse.Namespace) -> int:
         deadline = deadline.replace(tzinfo=timezone.utc)
     if datetime.now(timezone.utc) > deadline:
         return emit_refusal("CLAIM_GATE_REFUSED", "startDeadlineAt has passed")
+    print(json.dumps({"ok": True}))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# receipt-gate
+# ---------------------------------------------------------------------------
+
+
+def cmd_receipt_gate(args: argparse.Namespace) -> int:
+    """Gate the receipt POST response (W0 live slice, RND-4084 T411).
+
+    Exits 0 only when the response is the route's success envelope with
+    the JSON boolean ``observed: true`` and the JSON boolean
+    ``replay: false``. A replay answer (already observed) refuses: the
+    live job posts exactly once, so a replay means the post was not the
+    first and the job must fail loudly rather than report success.
+    Anything else — a missing envelope, a string "true", an absent or
+    non-boolean field — refuses.
+    """
+    try:
+        response = json.loads(read_bounded(args.response, MAX_JSON_BYTES).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return emit_refusal("RECEIPT_GATE_REFUSED", "receipt response is not valid JSON")
+    except Refusal as exc:
+        if exc.code in ("INPUT_NOT_FOUND", "INPUT_UNREADABLE", "INPUT_TOO_LARGE"):
+            raise
+        return emit_refusal("RECEIPT_GATE_REFUSED", exc.detail)
+    if not isinstance(response, dict):
+        return emit_refusal("RECEIPT_GATE_REFUSED", "receipt response must be a JSON object")
+    if response.get("success") is not True:
+        return emit_refusal("RECEIPT_GATE_REFUSED", "success is not the boolean true")
+    data = response.get("data")
+    if not isinstance(data, dict):
+        return emit_refusal("RECEIPT_GATE_REFUSED", "response has no data envelope")
+    if data.get("observed") is not True:
+        return emit_refusal("RECEIPT_GATE_REFUSED", "observed is not the boolean true")
+    if data.get("replay") is not False:
+        return emit_refusal("RECEIPT_GATE_REFUSED", "replay is not the boolean false")
     print(json.dumps({"ok": True}))
     return 0
 
@@ -1019,6 +1060,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--request", required=True)
     p.add_argument("--deploy-run-id", required=True)
     p.set_defaults(func=cmd_claim_gate)
+
+    p = sub.add_parser("receipt-gate")
+    p.add_argument("--response", required=True)
+    p.set_defaults(func=cmd_receipt_gate)
 
     p = sub.add_parser("receipt")
     p.add_argument("--baseline", required=True)
