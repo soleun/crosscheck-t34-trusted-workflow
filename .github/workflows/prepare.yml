@@ -473,7 +473,7 @@ jobs:
             -H 'Content-Type: application/json' \
             -H "Authorization: Bearer ${{ secrets.CROSSCHECK_UPLOAD_KEY }}" \
             -H "X-CrossCheck-Upload-Identity: $(<oidc-token.txt)" \
-            --data @claim-request.json \
+            --data-binary @claim-request.json \
             -o claim-response.json
           if python3 crosscheck-template/templates/shopify-merchant-app/prepare.py claim-gate \
             --response claim-response.json \
@@ -578,7 +578,7 @@ jobs:
             -H 'Content-Type: application/json' \
             -H "Authorization: Bearer ${{ secrets.CROSSCHECK_UPLOAD_KEY }}" \
             -H "X-CrossCheck-Upload-Identity: $(<oidc-receipt-token.txt)" \
-            --data @receipt.json \
+            --data-binary @receipt.json \
             -o receipt-response.json
           python3 crosscheck-template/templates/shopify-merchant-app/prepare.py receipt-gate \
             --response receipt-response.json
