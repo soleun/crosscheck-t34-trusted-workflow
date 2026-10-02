@@ -591,3 +591,15 @@ jobs:
             -o receipt-response.json
           python3 crosscheck-template/templates/shopify-merchant-app/prepare.py receipt-gate \
             --response receipt-response.json
+
+      - name: Fail the job when the live upload did not succeed
+        if: inputs.claim_mode == 'live' && steps.receipt.outputs.upload_status != 'succeeded'
+        run: |
+          if [ "${{ steps.claim.outputs.granted }}" = "true" ]; then
+            REFUSAL_CODE=UPLOAD_FAILED
+          else
+            REFUSAL_CODE=CLAIM_GATE_REFUSED
+          fi
+          printf '%s upload_status=%s\n' "$REFUSAL_CODE" "${{ steps.receipt.outputs.upload_status }}" >&2
+          printf '%s upload_status=%s\n' "$REFUSAL_CODE" "${{ steps.receipt.outputs.upload_status }}" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
