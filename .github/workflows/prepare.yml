@@ -171,10 +171,10 @@ jobs:
         id: manifest
         run: |
           python3 crosscheck-template/templates/shopify-merchant-app/prepare.py source-manifest \
-            --repo "$GITHUB_WORKSPACE/merchant" \
-            --commit "${{ inputs.commit_sha }}" \
-            --app-root "${{ inputs.app_root }}" \
-            --config-name "${{ inputs.config_name }}" \
+            --repo="$GITHUB_WORKSPACE/merchant" \
+            --commit="${{ inputs.commit_sha }}" \
+            --app-root="${{ inputs.app_root }}" \
+            --config-name="${{ inputs.config_name }}" \
             > source-manifest.json
           python3 -c "import json; print('source_archive_digest=' + json.load(open('source-manifest.json'))['sourceArchiveDigest'])" >> "$GITHUB_OUTPUT"
 
@@ -186,7 +186,7 @@ jobs:
           python3 crosscheck-template/templates/shopify-merchant-app/prepare.py policy-check \
             --baseline baseline.json \
             --manifest source-manifest.json \
-            --client-id "${{ inputs.client_id }}"
+            --client-id="${{ inputs.client_id }}"
 
       - name: Archive the enrolled source tree
         run: |
@@ -275,7 +275,7 @@ jobs:
         run: |
           printf '%s' "$BASELINE_JSON" > baseline.json
           python3 crosscheck-template/templates/shopify-merchant-app/prepare.py stage-dist \
-            --build-dir "${{ inputs.app_root }}" \
+            --build-dir="${{ inputs.app_root }}" \
             --baseline baseline.json \
             --out-dir build-output
         env:
@@ -429,7 +429,7 @@ jobs:
             --deploy-root deploy-root \
             --build-output build-output \
             --baseline baseline.json \
-            --app-root "${{ inputs.app_root }}"
+            --app-root="${{ inputs.app_root }}"
 
       - name: Re-verify the output digest against the attested one
         env:
@@ -455,18 +455,18 @@ jobs:
         if: inputs.claim_mode == 'live'
         run: |
           python3 crosscheck-template/templates/shopify-merchant-app/prepare.py claim-request \
-            --workspace-id "${{ inputs.workspace_id }}" \
-            --generation ${{ inputs.generation }} \
-            --preparation-nonce "${{ inputs.preparation_nonce }}" \
-            --requested-version "${{ inputs.requested_version }}" \
-            --github-repository-id "${{ github.repository_id }}" \
-            --github-run-id "${{ github.run_id }}" \
-            --github-run-attempt ${{ github.run_attempt }} \
-            --trusted-workflow-ref "${{ inputs.trusted_workflow_ref }}" \
-            --trusted-workflow-sha "${{ inputs.trusted_template_ref }}" \
-            --source-archive-digest "${{ needs.source.outputs.source_archive_digest }}" \
-            --build-output-digest "${{ needs.attest.outputs.build_output_digest }}" \
-            --build-artifact-id "${{ needs.build.outputs.build_artifact_id }}" \
+            --workspace-id="${{ inputs.workspace_id }}" \
+            --generation=${{ inputs.generation }} \
+            --preparation-nonce="${{ inputs.preparation_nonce }}" \
+            --requested-version="${{ inputs.requested_version }}" \
+            --github-repository-id="${{ github.repository_id }}" \
+            --github-run-id="${{ github.run_id }}" \
+            --github-run-attempt=${{ github.run_attempt }} \
+            --trusted-workflow-ref="${{ inputs.trusted_workflow_ref }}" \
+            --trusted-workflow-sha="${{ inputs.trusted_template_ref }}" \
+            --source-archive-digest="${{ needs.source.outputs.source_archive_digest }}" \
+            --build-output-digest="${{ needs.attest.outputs.build_output_digest }}" \
+            --build-artifact-id="${{ needs.build.outputs.build_artifact_id }}" \
             --output-manifest attested-manifest/output-manifest.redigest.json \
             --out claim-request.json
           curl -sS --max-time 60 -X POST "${{ inputs.claim_url }}" \
@@ -478,7 +478,7 @@ jobs:
           if python3 crosscheck-template/templates/shopify-merchant-app/prepare.py claim-gate \
             --response claim-response.json \
             --request claim-request.json \
-            --deploy-run-id "${{ inputs.deploy_run_id }}"; then
+            --deploy-run-id="${{ inputs.deploy_run_id }}"; then
             printf 'granted=true\n' >> "$GITHUB_OUTPUT"
           else
             printf 'granted=false\n' >> "$GITHUB_OUTPUT"
@@ -539,16 +539,16 @@ jobs:
             --manifest source-archive/source-manifest.json \
             --output attested-manifest/output-manifest.redigest.json \
             --claim claim.json \
-            --generation "${{ inputs.generation }}" \
-            --run-attempt "${{ github.run_attempt }}" \
-            --workflow-ref "${{ inputs.trusted_workflow_ref }}" \
-            --artifact-id "${{ needs.build.outputs.build_artifact_id }}" \
-            --artifact-digest "$(python3 -c "import hashlib; print(hashlib.sha256(open('attested-manifest/output-manifest.redigest.json','rb').read()).hexdigest())")" \
-            --image-digest "$(python3 -c "import hashlib; print(hashlib.sha256(open('/etc/os-release','rb').read()).hexdigest())")" \
-            --toolchain-digest "$(python3 -c "import hashlib; print(hashlib.sha256(open('build-meta/toolchain.txt','rb').read()).hexdigest())")" \
-            --cli-version "$(python3 -c "import json; print(json.load(open('crosscheck-template/templates/shopify-merchant-app/cli/package.json'))['dependencies']['@shopify/cli'])")" \
+            --generation="${{ inputs.generation }}" \
+            --run-attempt="${{ github.run_attempt }}" \
+            --workflow-ref="${{ inputs.trusted_workflow_ref }}" \
+            --artifact-id="${{ needs.build.outputs.build_artifact_id }}" \
+            --artifact-digest="$(python3 -c "import hashlib; print(hashlib.sha256(open('attested-manifest/output-manifest.redigest.json','rb').read()).hexdigest())")" \
+            --image-digest="$(python3 -c "import hashlib; print(hashlib.sha256(open('/etc/os-release','rb').read()).hexdigest())")" \
+            --toolchain-digest="$(python3 -c "import hashlib; print(hashlib.sha256(open('build-meta/toolchain.txt','rb').read()).hexdigest())")" \
+            --cli-version="$(python3 -c "import json; print(json.load(open('crosscheck-template/templates/shopify-merchant-app/cli/package.json'))['dependencies']['@shopify/cli'])")" \
             --build-status succeeded \
-            --upload-status "$UPLOAD_STATUS" \
+            --upload-status="$UPLOAD_STATUS" \
             $VERSIONS_ARG \
             --out receipt.json
           printf 'upload_status=%s\n' "$UPLOAD_STATUS" >> "$GITHUB_OUTPUT"
